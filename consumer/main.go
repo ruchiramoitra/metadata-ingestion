@@ -15,6 +15,7 @@ type CONSUMER_DATA struct {
 	EventTime    string
 	ConsumedTime time.Time
 	Type         string
+	Table        string
 }
 
 type TRANSFORMED_EVENT struct {
@@ -22,6 +23,7 @@ type TRANSFORMED_EVENT struct {
 	Data      string
 	EventTime string
 	Type      string
+	Table     string
 }
 
 func main() {
@@ -36,7 +38,8 @@ func main() {
 
 	defer c.Close()
 
-	c.SubscribeTopics([]string{"monte-carlo"}, nil)
+	// Subscribe to both topics
+	c.SubscribeTopics([]string{"monte-carlo", "internal"}, nil)
 
 	cluster := gocql.NewCluster("127.0.0.1")
 	cluster.Keyspace = "events"
@@ -45,24 +48,39 @@ func main() {
 		log.Fatalf("Failed to connect to Cassandra: %s", err)
 	}
 	defer session.Close()
-
+	fmt.Println("Consumer started")
+	// Start goroutines to handle each topic concurrently
 	for {
 		msg, err := c.ReadMessage(-1)
 		if err != nil {
 			fmt.Printf("Consumer error: %v (%v)\n", err, msg)
 			continue
 		}
-		fmt.Printf("Message on %s: %s\n", msg.TopicPartition, string(msg.Value))
-		transformedEvent := postConsumeTransformation(string(msg.Value))
-		if transformedEvent.Type == "METADATA" {
+
+		// Process messages based on their topic
+		switch *msg.TopicPartition.Topic {
+		case "monte-carlo":
+			transformedEvent := postConsumeTransformation(string(msg.Value))
 			// Store metadata in Cassandra
-			if err := session.Query("INSERT INTO metadata_event (EventId, Data, EventTime, ConsumedTime) VALUES (?, ?, ?, ?)", transformedEvent.EventId, transformedEvent.Data, transformedEvent.EventTime, transformedEvent.ConsumedTime).Exec(); err != nil {
-				log.Fatalf("Failed to insert metadata: %s", err)
+			if err := session.Query("INSERT INTO metadata_event (EventId, Data, EventTime, ConsumedTime) VALUES (?, ?, ?, ?)", transformedEvent.EventId, transformedEvent.Data, transformedEvent.EventTime, time.Now()).Exec(); err != nil {
+				log.Printf("Failed to insert metadata: %s", err)
+			}
+		case "internal":
+			fmt.Printf("Message on %s: %s\n", msg.TopicPartition, string(msg.Value))
+			transformedEvent := postConsumeTransformation(string(msg.Value))
+
+			// Update as required in Cassandra
+			if transformedEvent.Type == "CREATE TABLE" {
+				// Create table with transformedEvent.Table and columns from transformedEvent.Data
+				// Create table query
+				createTableQuery := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s)", transformedEvent.Table, transformedEvent.Data)
+				fmt.Println(createTableQuery)
+				if err := session.Query(createTableQuery).Exec(); err != nil {
+					log.Printf("Failed to create table: %s", err)
+				}
 			}
 		}
-
 	}
-
 }
 
 func postConsumeTransformation(event string) CONSUMER_DATA {
@@ -87,6 +105,7 @@ func postConsumeTransformation(event string) CONSUMER_DATA {
 		EventTime:    transformedEvent.EventTime,
 		ConsumedTime: time.Now(),
 		Type:         transformedEvent.Type,
+		Table:        transformedEvent.Table,
 	}
 
 }

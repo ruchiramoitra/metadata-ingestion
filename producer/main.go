@@ -1,19 +1,38 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"github.com/confluentinc/confluent-kafka-go/kafka"
+	_ "github.com/lib/pq"
 	"log"
+	"strings"
 	"time"
 )
 
-type TRANSFORMED_EVENT struct {
+type TransformedEvent struct {
 	EventId   string
 	Data      string
 	EventTime string
 	Type      string
+	Table     string
 }
+
+type SchemaChangeLog struct {
+	TableName     string    `json:"table_name"`
+	OperationType string    `json:"operation_type"`
+	ChangedAt     time.Time `json:"changed_at"`
+}
+
+type Column struct {
+	ColumnName string `json:"column_name"`
+	DataType   string `json:"data_type"`
+}
+
+const (
+	connStr = "user=rudder dbname=sources sslmode=disable port=7432 password=password"
+)
 
 func main() {
 	p, err := kafka.NewProducer(&kafka.ConfigMap{"bootstrap.servers": "localhost:9092"})
@@ -23,29 +42,8 @@ func main() {
 
 	defer p.Close()
 
-	numGoroutines := 5
-
-	// Start multiple goroutines to simulate incoming metadata from Monte Carlo
-	for i := 0; i < numGoroutines; i++ {
-		go func(goroutineID int) {
-			for {
-				actualEvent := fmt.Sprintf("metadata-event-%d-from-goroutine-%d", time.Now().Unix(), goroutineID)
-				transformedEvent := preIngestTransformation(actualEvent)
-				bytes, err := json.Marshal(transformedEvent)
-				if err != nil {
-					log.Printf("Failed to marshal event: %s", err)
-					continue
-				}
-
-				topic := "monte-carlo"
-				p.Produce(&kafka.Message{
-					TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
-					Value:          bytes,
-				}, nil)
-			}
-		}(i)
-	}
-
+	//go MonteCarloEvents(p)
+	go PostgresTriggerEvents(p)
 	// Wait for message deliveries
 	for e := range p.Events() {
 		switch ev := e.(type) {
@@ -53,13 +51,95 @@ func main() {
 			if ev.TopicPartition.Error != nil {
 				fmt.Printf("Delivery failed: %v\n", ev.TopicPartition)
 			} else {
-				fmt.Printf("Delivered message to %v\n", ev.TopicPartition)
+				//fmt.Printf("Delivered message to %v\n", ev.TopicPartition)
 			}
+		}
+	}
+
+}
+
+func PostgresTriggerEvents(producer *kafka.Producer) {
+	db, err := sql.Open("postgres", connStr)
+	if err != nil {
+		log.Fatalf("Error connecting to the database: %v", err)
+	}
+	defer db.Close()
+
+	// Periodically check for new schema changes
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	var lastFetched time.Time
+	for {
+		select {
+		case <-ticker.C:
+			schemaChanges, err := fetchSchemaChanges(db, lastFetched.UTC())
+			fmt.Println(lastFetched)
+			fmt.Println(schemaChanges)
+			if err != nil {
+				log.Printf("Error fetching schema changes: %v", err)
+				continue
+			}
+
+			for _, change := range schemaChanges {
+				fmt.Printf("Change: %v\n", change)
+				if columns, err := handleSchemaChange(db, change); err != nil {
+					log.Printf("Error processing schema change: %v", err)
+				} else {
+					fmt.Printf("Columns: %s\n", columns)
+					transformedColumns := preIngestTransformation(transformColumns(columns), change.OperationType, change.TableName)
+					bytes, err := json.Marshal(transformedColumns)
+					if err != nil {
+						log.Printf("Failed to marshal event: %s", err)
+						continue
+					}
+
+					// send these columns to kafka producer
+					topic := "internal"
+					producer.Produce(&kafka.Message{
+						TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
+						Value:          bytes,
+					}, nil)
+				}
+			}
+			lastFetched = time.Now()
 		}
 	}
 }
 
-func preIngestTransformation(event string) TRANSFORMED_EVENT {
+func transformColumns(columns []Column) string {
+	// Create a string in the format "name type, name type, ..."
+	var transformedColumns []string
+	for _, column := range columns {
+		transformedColumns = append(transformedColumns, column.ColumnName+" "+column.DataType)
+	}
+	return strings.Join(transformedColumns, ", ")
+}
+
+func MonteCarloEvents(producer *kafka.Producer) {
+	numGoroutines := 5
+	// Start multiple goroutines to simulate incoming metadata from Monte Carlo
+	for i := 0; i < numGoroutines; i++ {
+		go func(goroutineID int) {
+			for {
+				actualEvent := fmt.Sprintf("metadata-event-%d-from-goroutine-%d", time.Now().Unix(), goroutineID)
+				transformedEvent := preIngestTransformation(actualEvent, "METADATA", "")
+				bytes, err := json.Marshal(transformedEvent)
+				if err != nil {
+					log.Printf("Failed to marshal event: %s", err)
+					continue
+				}
+
+				topic := "monte-carlo"
+				producer.Produce(&kafka.Message{
+					TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
+					Value:          bytes,
+				}, nil)
+			}
+		}(i)
+	}
+}
+
+func preIngestTransformation(event string, eventType string, table string) TransformedEvent {
 	// let's say we want to convert the event into a json in the following format which is expected by the consumer
 	/**
 	{
@@ -73,10 +153,57 @@ func preIngestTransformation(event string) TRANSFORMED_EVENT {
 
 	uniqueId := fmt.Sprintf("EVENT-UNIQUE-ID-%d", time.Now().UnixNano())
 	eventTime := time.Now().Format(time.RFC3339)
-	return TRANSFORMED_EVENT{
+	return TransformedEvent{
 		EventId:   uniqueId,
 		Data:      event,
 		EventTime: eventTime,
-		Type:      "METADATA",
+		Type:      eventType,
+		Table:     table,
 	}
+}
+
+func fetchSchemaChanges(db *sql.DB, lastFetched time.Time) ([]SchemaChangeLog, error) {
+	query := `
+		SELECT table_name, operation_type, changed_at
+		FROM schema_change
+		WHERE changed_at > $1
+		ORDER BY changed_at ASC;
+	`
+
+	rows, err := db.Query(query, lastFetched)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var changes []SchemaChangeLog
+	for rows.Next() {
+		var change SchemaChangeLog
+		if err := rows.Scan(&change.TableName, &change.OperationType, &change.ChangedAt); err != nil {
+			return nil, err
+		}
+		changes = append(changes, change)
+	}
+	return changes, nil
+}
+
+func handleSchemaChange(db *sql.DB, change SchemaChangeLog) (columns []Column, err error) {
+	query := `SELECT column_name, data_type
+	FROM information_schema.columns
+	WHERE table_schema = $1 AND table_name = $2;`
+	// separate tableName by dot
+	tableName := strings.Split(change.TableName, ".")
+	rows, err := db.Query(query, tableName[0], tableName[1])
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var column Column
+		if err := rows.Scan(&column.ColumnName, &column.DataType); err != nil {
+			return nil, err
+		}
+		columns = append(columns, column)
+	}
+	return columns, nil
 }
