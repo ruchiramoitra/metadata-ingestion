@@ -20,3 +20,30 @@ PostgreSQL: For tracking schema changes.
 Docker: For running kafka 
 
 Note: For now postgres and cassandra is running locally.
+
+Script to tirgger changes in schema:
+`CREATE TABLE schema_change (
+    id SERIAL PRIMARY KEY,
+    table_name TEXT NOT NULL,
+    operation_type TEXT NOT NULL,
+    changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+select * from schema_change;
+CREATE OR REPLACE FUNCTION log_schema_change()
+RETURNS event_trigger AS $$
+DECLARE
+    cmd RECORD;
+BEGIN
+    -- Loop through all commands that triggered the event
+    FOR cmd IN SELECT * FROM pg_event_trigger_ddl_commands() LOOP
+        INSERT INTO schema_change (table_name, operation_type)
+        VALUES (cmd.object_identity, cmd.command_tag);
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE EVENT TRIGGER schema_change_trigger
+ON ddl_command_end
+WHEN TAG = ('ALTER TABLE', 'CREATE TABLE', 'DROP TABLE')
+EXECUTE PROCEDURE log_schema_change();`
