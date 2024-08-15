@@ -7,6 +7,8 @@ This project provides a metadata ingestion service and schema change trigger fro
 ## Cassandra Integration: Stores transformed metadata events.
 ## PostgreSQL Integration: Tracks schema changes and updates tables accordingly.
 ## Event Transformation: Transforms raw events into a structured format.
+## Metrics and Visualisation: Collect number of events being produced and the duration to produce by kafka and visualise in dashboard for analytics.
+## Containerized: App can be run by running docker compose up. All the features will be running as mentioned above.
 
 # Technologies Used
 Go: Main programming language.
@@ -19,9 +21,13 @@ PostgreSQL: For tracking schema changes.
 
 Docker: For running kafka 
 
-Note: For now postgres and cassandra is running locally.
+Prometheus: For collecting metrics
+
+Grafana: For visualising metrics
+
 
 Script to tirgger changes in schema:
+
 `CREATE TABLE schema_change (
     id SERIAL PRIMARY KEY,
     table_name TEXT NOT NULL,
