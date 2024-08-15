@@ -6,6 +6,7 @@ import (
 	"github.com/confluentinc/confluent-kafka-go/kafka"
 	"github.com/gocql/gocql"
 	"log"
+	"strings"
 	"time"
 )
 
@@ -73,7 +74,8 @@ func main() {
 			if transformedEvent.Type == "CREATE TABLE" {
 				// Create table with transformedEvent.Table and columns from transformedEvent.Data
 				// Create table query
-				createTableQuery := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s)", transformedEvent.Table, transformedEvent.Data)
+				name := strings.Split(transformedEvent.Table, ".")[1]
+				createTableQuery := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (primary_key text PRIMARYKEY, %s)", name, transformedEvent.Data)
 				fmt.Println(createTableQuery)
 				if err := session.Query(createTableQuery).Exec(); err != nil {
 					log.Printf("Failed to create table: %s", err)

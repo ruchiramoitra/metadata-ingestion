@@ -4,11 +4,17 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"github.com/confluentinc/confluent-kafka-go/kafka"
-	_ "github.com/lib/pq"
 	"log"
 	"strings"
 	"time"
+
+	"net/http"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/confluentinc/confluent-kafka-go/kafka"
+	_ "github.com/lib/pq"
 )
 
 type TransformedEvent struct {
@@ -34,7 +40,30 @@ const (
 	connStr = "user=rudder dbname=sources sslmode=disable port=7432 password=password"
 )
 
+var (
+	kafkaMonteCarloMessagesProduced = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kafka_monte_carlo_messages_produced_total",
+	})
+	postgresSchemaChanges = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "postgres_schema_changes_total",
+	})
+	kafkaProduceDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "kafka_produce_duration_seconds",
+		Buckets: prometheus.DefBuckets,
+	})
+)
+
+func init() {
+	// Register the metrics with Prometheus
+	prometheus.MustRegister(kafkaMonteCarloMessagesProduced)
+	prometheus.MustRegister(postgresSchemaChanges)
+	prometheus.MustRegister(kafkaProduceDuration)
+}
 func main() {
+	http.Handle("/metrics", promhttp.Handler())
+	go func() {
+		log.Fatal(http.ListenAndServe(":9091", nil))
+	}()
 	p, err := kafka.NewProducer(&kafka.ConfigMap{"bootstrap.servers": "localhost:9092"})
 	if err != nil {
 		log.Fatalf("Failed to create producer: %s", err)
@@ -42,7 +71,7 @@ func main() {
 
 	defer p.Close()
 
-	//go MonteCarloEvents(p)
+	go MonteCarloEvents(p)
 	go PostgresTriggerEvents(p)
 	// Wait for message deliveries
 	for e := range p.Events() {
@@ -50,8 +79,6 @@ func main() {
 		case *kafka.Message:
 			if ev.TopicPartition.Error != nil {
 				fmt.Printf("Delivery failed: %v\n", ev.TopicPartition)
-			} else {
-				//fmt.Printf("Delivered message to %v\n", ev.TopicPartition)
 			}
 		}
 	}
@@ -95,10 +122,14 @@ func PostgresTriggerEvents(producer *kafka.Producer) {
 
 					// send these columns to kafka producer
 					topic := "internal"
+					start := time.Now()
 					producer.Produce(&kafka.Message{
 						TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
 						Value:          bytes,
 					}, nil)
+
+					postgresSchemaChanges.Inc()
+					kafkaProduceDuration.Observe(time.Since(start).Seconds())
 				}
 			}
 			lastFetched = time.Now()
@@ -130,10 +161,14 @@ func MonteCarloEvents(producer *kafka.Producer) {
 				}
 
 				topic := "monte-carlo"
+				start := time.Now()
 				producer.Produce(&kafka.Message{
 					TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
 					Value:          bytes,
 				}, nil)
+				fmt.Println("incrementing")
+				kafkaMonteCarloMessagesProduced.Inc()
+				kafkaProduceDuration.Observe(time.Since(start).Seconds())
 			}
 		}(i)
 	}
