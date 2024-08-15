@@ -1,0 +1,1 @@
+CREATE TABLE schema_change ( id SERIAL PRIMARY KEY, table_name TEXT NOT NULL, operation_type TEXT NOT NULL, changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP );

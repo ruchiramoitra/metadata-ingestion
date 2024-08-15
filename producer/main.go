@@ -37,7 +37,7 @@ type Column struct {
 }
 
 const (
-	connStr = "user=rudder dbname=sources sslmode=disable port=7432 password=password"
+	connStr = "user=ruchira dbname=sources sslmode=disable port=8432 password=password"
 )
 
 var (
@@ -166,7 +166,6 @@ func MonteCarloEvents(producer *kafka.Producer) {
 					TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
 					Value:          bytes,
 				}, nil)
-				fmt.Println("incrementing")
 				kafkaMonteCarloMessagesProduced.Inc()
 				kafkaProduceDuration.Observe(time.Since(start).Seconds())
 			}

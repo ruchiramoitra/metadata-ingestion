@@ -16,3 +16,39 @@ services:
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
     depends_on:
       - zookeeper
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ruchira
+  postgres:
+    image: postgres:latest
+    ports:
+      - "8432:5432"
+    environment:
+      POSTGRES_USER: ruchira
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: sources
+    volumes:
+      - ./init-scripts:/docker-entrypoint-initdb.d/
+  producer:
+    build:
+      context: ./producer
+    depends_on:
+      - kafka
+      - postgres
+    ports:
+      - "9095:9095"
+
+  consumer:
+    build:
+      context: ./consumer
+    depends_on:
+      - kafka
+      - cassandra
+
+  cassandra:
+    image: cassandra:latest
+    ports:
+      - "9043:9042"
